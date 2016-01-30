@@ -93,8 +93,6 @@ class Sniffer(threading.Thread, SnifferCollector.SnifferCollector):
     def missedPackets(self):
         return self._missedPackets
     
-    
-    
     # The number of packets which were sniffed in the last BLE connection. From CONNECT_REQ until link loss/termination.
     @property
     def packetsInLastConnection(self):

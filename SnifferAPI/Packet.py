@@ -73,16 +73,10 @@ class PacketReader(Notifications.Notifier):
         Notifications.Notifier.__init__(self, callbacks)
         self.portnum = portnum
         self.exit = False
-        try:
-            self.uart = UART.Uart(portnum)
-        except serial.SerialException as e:
-            logging.exception("Error opening UART.")
-            self.uart = UART.Uart()
+        self.uart = UART.Uart()
         self.packetCounter = 0
-        self.lastReceivedPacketCounter = 0
+        self.missedPackets = 0
         self.lastReceivedPacket = None
-        
-        # self.states = {}
         
     def setup(self):
         self.findSerialPort()
@@ -126,7 +120,7 @@ class PacketReader(Notifications.Notifier):
             if serialByte == SLIP_END:
                 endOfPacket = True
             elif serialByte == SLIP_ESC:
-                serialByte = self.getSerialByte()
+                serialByte = self.getSerialByte(timeout)
                 if serialByte == SLIP_ESC_START:
                     dataBuffer.append(SLIP_START)
                 elif serialByte == SLIP_ESC_END:
@@ -142,16 +136,16 @@ class PacketReader(Notifications.Notifier):
     # This function read byte chuncks from the serial port and return one byte at a time  
     # Based on https://github.com/mehdix/pyslip/
     def getSerialByte(self, timeout = None):
-        serialByte = self.uart.readByte(timeout)
-        if len(serialByte) != 1:
-            raise Exceptions.SnifferTimeout("Packet read timed out.")
-        return ord(serialByte)
-
+        return self.uart.readByte(timeout)
             
     def handlePacketHistory(self, packet):
         # Reads and validates packet counter
-        if self.lastReceivedPacket and (packet.packetCounter != (self.lastReceivedPacket.packetCounter+1)) and (self.lastReceivedPacket.packetCounter != 0):
-            logging.info("gap in packets, between "+str(self.lastReceivedPacket.packetCounter) + " and " + str(packet.packetCounter) + " packet before: "+ str(self.lastReceivedPacket.packetList)+ " packet after: " + str(packet.packetList))
+        if self.lastReceivedPacket:
+            packetCounterDelta = (65536 + packet.packetCounter - self.lastReceivedPacket.packetCounter) % 65536
+            self.missedPackets += packetCounterDelta - 1
+            if packetCounterDelta > 1:
+                logging.warning("gap in packets, between %d and %d, packet before: %s, packet after: %s", self.lastReceivedPacket.packetCounter, packet.packetCounter,
+                             self.lastReceivedPacket.packetList, packet.packetList)
         self.lastReceivedPacket = packet
         
     def getPacket(self, timeout = None):
@@ -159,21 +153,13 @@ class PacketReader(Notifications.Notifier):
         try:
             packetList = self.decodeFromSLIP(timeout)
         except Exceptions.UARTPacketError:
-            logging.exception("")
+            logging.exception("SLIP decode error")
             return None
         else:
             packet = Packet(packetList)
             if packet.valid:
                 self.handlePacketHistory(packet)
             return packet
-        
-        
-    def useByteQueue(self, useByteQueue = True):
-        self.uart.useByteQueue = useByteQueue
-        
-    def getByteQueue(self):
-        return self.uart.byteQueue
-        
 
     def sendPacket(self, id, payload, timeout = None):
         packetList = [HEADER_LENGTH] + [len(payload)] + [PROTOVER] + toLittleEndian(self.packetCounter, 2) + [id] + payload
@@ -199,7 +185,8 @@ class PacketReader(Notifications.Notifier):
             TK = TK[:16]                
         self.sendPacket(SET_TEMPORARY_KEY, TK, timeout)
         
-        logging.info("Sent key value to sniffer: "+str(TK))
+        logging.info("Sent key value to sniffer: %s", TK)
+
         self.notify("TK_SENT", {"TK":TK})
         return TK
 
@@ -221,7 +208,7 @@ class PacketReader(Notifications.Notifier):
         self.sendPacket(GO_IDLE, [], timeout)
         
     
-    def findSerialPort(self):            
+    def findSerialPort(self):
         foundPort = False
         iPort = 0 # To avoid COM1 (iPort=0).
         nTicks = 0
@@ -268,9 +255,7 @@ class PacketReader(Notifications.Notifier):
                 
             except Exception as e:
                 if "The system cannot find the file specified." not in str(e):
-                    # logging.exception("Error on COM"+str(iPort+1)+": "+str(e))
-                    logging.info("Error on port "+str(iPort)+". file: "+os.path.basename(sys.exc_info()[2].tb_frame.f_code.co_filename)+", line "+str(sys.exc_info()[2].tb_lineno)+": "+str(e))
-                    # logging.exception("error")
+                    logging.exception("Error on port: %s, file: %s, line: %s", str(iPort), os.path.basename(sys.exc_info()[2].tb_frame.f_code.co_filename), str(sys.exc_info()[2].tb_lineno))
                 try:
                     self.uart.ser.close()
                 except:
@@ -308,13 +293,13 @@ class Packet:
             self.readDynamicHeader(packetList)
             self.readPayload(packetList)
 
-        except Exceptions.InvalidPacketException as e:
-            logging.error("Invalid packet: %s" % str(e))
+        except Exceptions.InvalidPacketException:
+            logging.exception("Invalid packet")
             self.OK = False
             self.valid = False
         except:
             logging.exception("packet creation error")
-            logging.info("packetList: " + str(packetList))
+            logging.info("packetList: %s", str(packetList))
             self.OK = False
             self.valid = False
 
@@ -338,7 +323,7 @@ class Packet:
             self.packetCounter = parseLittleEndian(packetList[PACKETCOUNTER_POS:PACKETCOUNTER_POS+2])
             self.id = packetList[ID_POS]
         else:
-            logging.info("incorrect header length: %d" % self.headerLength)
+            logging.warning("incorrect header length: %d", self.headerLength)
         
     # def writeDynamicHeader(self, packetList):
         # if self.headerLength == HEADER_LENGTH:
@@ -409,9 +394,7 @@ class Packet:
                 # return self.syncWord + [self.id] + [self.length] + [self.flags] + [self.channel] + [self.rawRSSI] + self.eventCounter + self.timestamp + self.payload
             # else:
                 # return self.syncWord + [self.id] + [self.length] + self.payload
-        # except AttributeError:
-        
-        
+        # except AttributeError:        
         return self.packetList
     
     def asString(self):
@@ -424,7 +407,7 @@ class Packet:
             else:
                 return False
         except:
-            logging.exception("Invalid packet: %s" % str(packetList))
+            logging.exception("Invalid packet: %s", str(packetList))
             return False
         
 class BlePacket():
@@ -479,8 +462,7 @@ class BlePacket():
             name = '"'+name+'"'
         elif (self.advType == 1):
             name = "[ADV_DIRECT_IND]"
-            
-        self.name = name#.decode(encoding="UTF-8")
+        self.name = name
     
     def extractLength(self, packetList):
         length = packetList[5]
@@ -503,4 +485,4 @@ def toLittleEndian(value, size):
     for i in range(size):
         list[i] = (value >> (i*8)) % 256
     return list
-    
+

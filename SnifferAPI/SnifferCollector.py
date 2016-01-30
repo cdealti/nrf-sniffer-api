@@ -49,7 +49,7 @@ class SnifferCollector(Notifications.Notifier):
         self._devices = Devices.DeviceList(callbacks=[("*", self.passOnNotification)])
         
         self._missedPackets = 0
-        self._packetsInLastConnection = None
+        self._packetsInLastConnection = 0
         self._connectEventPacketCounterValue = None
         self._inConnection = False
         self._currentConnectRequest = None
@@ -150,6 +150,7 @@ class SnifferCollector(Notifications.Notifier):
         while not self._exit:
             try:
                 packet = self._packetReader.getPacket(timeout = 2)
+                self._missedPackets = self._packetReader.missedPackets
                 if not packet.valid:
                     raise Exceptions.InvalidPacketException("")
             except Exceptions.SnifferTimeout as e:
@@ -160,7 +161,7 @@ class SnifferCollector(Notifications.Notifier):
                 logging.error("Lost contact with sniffer hardware.")
                 self._doExit()
             except Exceptions.InvalidPacketException:
-                # logging.error("Continuously pipe: Invalid packet, skipping.")
+                logging.error("Continuously pipe: Invalid packet, skipping.")
                 pass
             else:
                 if packet.id == EVENT_PACKET:
@@ -175,7 +176,7 @@ class SnifferCollector(Notifications.Notifier):
                     self._currentConnectRequest = copy.copy(self._findPacketByPacketCounter(self._connectEventPacketCounterValue-1)) # copy it because packets are eventually deleted
                 elif packet.id == EVENT_DISCONNECT:
                     if self._inConnection:
-                        self._packetsInLastConnection = packet.packetCounter - self._connectEventPacketCounterValue
+                        self._packetsInLastConnection = 1 + (65536 + packet.packetCounter - self._connectEventPacketCounterValue) % 65536
                         self._inConnection = False
                 elif packet.id == SWITCH_BAUD_RATE_RESP and self._switchingBaudRate:
                     self._switchingBaudRate = False
