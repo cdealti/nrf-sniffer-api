@@ -49,9 +49,9 @@ class Uart:
         
     def writeList(self, array, timeout = None):
         nBytes = 0
-        if timeout != self.ser.write_timeout:
+        if timeout != self.ser.writeTimeout:
             try:
-                self.ser.write_timeout = timeout
+                self.ser.writeTimeout = timeout
             except ValueError:
                 logging.exception("Invalid UART write timeout: %d. Continuing.", timeout)
         try:
